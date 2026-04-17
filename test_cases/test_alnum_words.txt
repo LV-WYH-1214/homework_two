@@ -1,0 +1,2 @@
+This line includes C99, Hello123, and AI2025.
+C99 is a standard name, while Hello123 and AI2025 mix letters with digits.
