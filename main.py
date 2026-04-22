@@ -1,281 +1,621 @@
-from dataclasses import dataclass
+from collections.abc import Generator
+from dataclasses import dataclass, field
+import math
+import unicodedata
 
 
-# 词频统计上限：最多记录 100 个不同单词
-MAX_WORDS = 100
-# 单词长度上限：超过后按前 50 个字符截断，并输出告警
-MAX_WORD_LEN = 50
-# 分块读取大小：兼顾内存占用与读取效率
+# 读取与统计配置
 CHUNK_SIZE = 8192
+MAX_WORD_LEN = 50
+SENTENCE_TERMINATORS = ".!?"
+
+# 报告格式配置
+REPORT_LABEL_WIDTH = 20
+REPORT_LINE_WIDTH = 52
+
+# 默认输入输出配置
+INPUT_FILENAME = "text_test.txt"
+REPORT_FILENAME = "text_report.txt"
+TFIDF_COMPARE_FILENAME = "test_cases/test_alnum_words.txt"
+KEYWORD_TOP_K = 5
 
 
 @dataclass
-class WordFreq:
-    """保存一个标准化单词及其出现次数。"""
+class TextStats:
+    """统一管理基础统计结果。"""
+
+    char_count: int = 0
+    word_count: int = 0
+    line_count: int = 0
+    sentence_count: int = 0
+    avg_word_length: float = 0.0
+    truncated_word_count: int = 0
+
+
+@dataclass
+class Term:
+    """词项：词频、TF、IDF、TF-IDF。"""
 
     word: str
-    count: int
+    count: int = 0
+    tf: float = 0.0
+    idf: float = 0.0
+    tfidf: float = 0.0
 
 
-def is_english_letter(ch):
-    """判断字符是否为英文大小写字母（仅 A-Z / a-z）。"""
+@dataclass
+class Document:
+    """文档：文件名、词项集合、总词数。"""
 
-    return ('a' <= ch <= 'z') or ('A' <= ch <= 'Z')
-
-
-def _submit_word(word, was_truncated, freq, warning_stats):
-    """
-    提交一个完整单词到词频表。
-
-    处理流程：
-    1) 将弯撇号归一化为直撇号，并统一转小写。
-    2) 若单词超长则截断，并累计截断告警次数。
-    3) 若词已存在则 count + 1。
-    4) 若词不存在且词表已满，则忽略并累计超上限告警次数。
-    5) 否则新增词条。
-    """
-
-    normalized = word.replace('’', "'").lower()
-
-    # 超长词统一按前 MAX_WORD_LEN 字符参与统计
-    if was_truncated or len(normalized) > MAX_WORD_LEN:
-        normalized = normalized[:MAX_WORD_LEN]
-        warning_stats['truncated'] += 1
-
-    # 线性查重：若已存在直接累加频次
-    for item in freq:
-        if item.word == normalized:
-            item.count += 1
-            return
-
-    # 词条已达上限：忽略新词，但程序继续执行
-    if len(freq) >= MAX_WORDS:
-        warning_stats['ignored_new'] += 1
-        return
-
-    # 新词且未超上限：加入词频表
-    freq.append(WordFreq(word=normalized, count=1))
+    filename: str
+    terms: dict[str, Term] = field(default_factory=dict)
+    total_words: int = 0
 
 
-def compute_word_freq(
-    fp,
-    freq,
-    total_words,
-    letter_freq=None,
-    total_letters=None,
-    longest_word=None,
-    max_len=None,
-    chars_out=None,
-    lines_out=None,
-):
-    """
-    Python 等价实现：compute_word_freq(FILE *fp, WordFreq *freq, int *total_words)
+@dataclass
+class AnalysisResult:
+    """单文件分析结果。"""
 
-    参数：
-    - fp: 已打开的文本文件对象（按字符读取）
-    - freq: 词频列表（元素为 WordFreq）
-    - total_words: 单元素列表，用于模拟 C 里的“输出参数”
-    - letter_freq: 可选，长度为 26 的列表，统计 a-z 出现次数
-    - total_letters: 可选，单元素列表，统计英文字母总数
-    - longest_word: 可选，单元素列表，保存最长单词（并列时保留先出现的）
-    - max_len: 可选，单元素列表，保存最长单词长度
-    - chars_out: 可选，单元素列表，输出字符总数
-    - lines_out: 可选，单元素列表，输出行数（含末行无换行的修正）
+    stats: TextStats
+    word_frequency: dict[str, int]
+    letter_frequency: list[int]
+    total_letters: int
+    longest_word: str
+    longest_word_len: int
 
-    返回：
-    - warning_stats: {"truncated": 超长截断次数, "ignored_new": 超上限忽略新词次数}
-    """
 
-    warning_stats = {'truncated': 0, 'ignored_new': 0}
+def is_word_char(ch: str) -> bool:
+    """单词字符口径：ASCII 字母或数字（等价 isalnum）。"""
 
-    # 状态机定义：
-    # 0 = 词外
-    # 1 = 词内，且上一字符是字母
-    # 2 = 词内，且上一字符是撇号（等待下一个字母确认是否仍属同一词）
-    word_state = 0
+    return ch.isascii() and ch.isalnum()
 
-    # 当前正在构造的单词缓冲区（按字符追加）
-    current_word_chars = []
-    # 标记当前词是否发生过“超过 MAX_WORD_LEN 后继续读入”的情况
+
+def _display_width(text: str) -> int:
+    """计算字符串显示宽度（全角/宽字符计为 2）。"""
+
+    width = 0
+    for ch in str(text):
+        width += 2 if unicodedata.east_asian_width(ch) in {"W", "F"} else 1
+    return width
+
+
+def _pad_display(text: str, width: int = REPORT_LABEL_WIDTH) -> str:
+    """按显示宽度左对齐补空格（等价 %-Ns 的终端对齐效果）。"""
+
+    text_value = str(text)
+    pad_size = width - _display_width(text_value)
+    if pad_size <= 0:
+        return text_value
+    return text_value + (" " * pad_size)
+
+
+def _format_io_error(action: str, filename: str, exc: Exception | None = None) -> str:
+    """统一 I/O 错误提示模板。"""
+
+    if exc is None:
+        return f"错误：{action}文件失败：{filename}"
+    return f"错误：{action}文件失败：{filename}（{exc}）"
+
+
+def iter_words(fp, warning_stats: dict[str, int] | None = None) -> Generator[str, None, None]:
+    """状态机分词：连续分隔符不会重复计数。"""
+
+    in_word = False
+    current_word_chars: list[str] = []
     current_word_truncated = False
 
-    # 可选输出：基础统计信息（用于避免主流程二次扫描）
-    chars_count = 0
-    lines_count = 0
-    last_char = ""
-
-    def append_with_limit(ch):
-        """向当前词缓冲追加字符；超过上限后只记截断标记，不再追加内容。"""
-
-        nonlocal current_word_truncated
-        if len(current_word_chars) < MAX_WORD_LEN:
-            current_word_chars.append(ch)
-        else:
-            current_word_truncated = True
-
-    def commit_current_word():
-        """提交当前缓冲词并重置缓冲区。"""
-
+    def commit_word():
         nonlocal current_word_chars, current_word_truncated
-        if current_word_chars:
-            # 最长单词统计：仅在严格更长时更新，保证并列长度保留第一个
-            if longest_word is not None and max_len is not None:
-                current_len = len(current_word_chars)
-                if current_len > max_len[0]:
-                    max_len[0] = current_len
-                    longest_word[0] = ''.join(current_word_chars)
+        if not current_word_chars:
+            return None
 
-            _submit_word(''.join(current_word_chars), current_word_truncated, freq, warning_stats)
+        word = "".join(current_word_chars)
+        if current_word_truncated and warning_stats is not None:
+            warning_stats["truncated"] = warning_stats.get("truncated", 0) + 1
+
         current_word_chars = []
         current_word_truncated = False
+        return word
 
-    # 分块读取文件，避免一次性读入大文件
     while True:
         chunk = fp.read(CHUNK_SIZE)
         if not chunk:
             break
 
         for ch in chunk:
-            chars_count += 1
-            last_char = ch
-            if ch == '\n':
-                lines_count += 1
+            if is_word_char(ch):
+                if not in_word:
+                    in_word = True
+                    current_word_chars = []
+                    current_word_truncated = False
 
-            if is_english_letter(ch):
-                lower_ch = ch.lower()
-
-                # 可选输出：在单词统计同时累计字母频率
-                if letter_freq is not None and total_letters is not None:
-                    letter_freq[ord(lower_ch) - ord('a')] += 1
-                    total_letters[0] += 1
-
-                if word_state == 0:
-                    # 从词外进入词内：识别到一个新单词
-                    total_words[0] += 1
-                    append_with_limit(lower_ch)
-                elif word_state == 1:
-                    # 正常词内延续
-                    append_with_limit(lower_ch)
+                if len(current_word_chars) < MAX_WORD_LEN:
+                    current_word_chars.append(ch.lower())
                 else:
-                    # 仅当“撇号后紧跟字母”时，撇号才并入单词（don't 记为一个词）
-                    append_with_limit("'")
-                    append_with_limit(lower_ch)
-                word_state = 1
-            elif ch in ("'", '’') and word_state == 1:
-                # 词内遇到撇号：先进入“待确认”状态，等待下一个字符判断
-                word_state = 2
+                    current_word_truncated = True
             else:
-                # 遇到分隔符：若刚在词内则提交当前词
-                if word_state in (1, 2):
-                    commit_current_word()
-                word_state = 0
+                if in_word:
+                    word = commit_word()
+                    if word is not None:
+                        yield word
+                    in_word = False
 
-    # 文件结束时，若仍在词内，需要补提交最后一个词
-    if word_state in (1, 2):
-        commit_current_word()
-
-    # 对“末行无换行符”进行行数修正
-    if chars_count > 0 and last_char != '\n':
-        lines_count += 1
-
-    if chars_out is not None:
-        chars_out[0] = chars_count
-    if lines_out is not None:
-        lines_out[0] = lines_count
-
-    return warning_stats
+    if in_word:
+        word = commit_word()
+        if word is not None:
+            yield word
 
 
-def main():
-    """
-    程序入口。
+def scan_character_level(filepath: str):
+    """字符层扫描：字符数、行数、句子数、字母频率。"""
 
-    采用“单次扫描”策略：一次遍历同时得到
-    字符数、单词数、行数、词频、字母频率和最长单词。
-    """
+    char_count = 0
+    line_count = 0
+    sentence_count = 0
+    last_char = ""
+    prev_is_terminator = False
 
-    # 输入文件名（当前按题目要求固定为 text_test.txt）
-    filename = "text_test.txt"
+    letter_frequency = [0] * 26
+    total_letters = 0
 
-    # 单次扫描：基础统计 + 词频 + 字母频率 + 最长单词
-    freq = []
-    total_words = [0]  # 通过单元素列表模拟“可写输出参数”
-    letter_freq = [0] * 26  # 下标 0-25 分别对应 a-z
-    total_letters = [0]  # 英文字母总数
-    longest_word = [""]  # 最长单词
-    max_len = [0]  # 最长单词长度
-    chars_out = [0]  # 字符总数
-    lines_out = [0]  # 行数
-    warning_stats = {'truncated': 0, 'ignored_new': 0}
+    with open(filepath, "r", encoding="utf-8") as fp:
+        while True:
+            chunk = fp.read(CHUNK_SIZE)
+            if not chunk:
+                break
+
+            char_count += len(chunk)
+            line_count += chunk.count("\n")
+            last_char = chunk[-1]
+
+            for ch in chunk:
+                if ch in SENTENCE_TERMINATORS:
+                    if not prev_is_terminator:
+                        sentence_count += 1
+                    prev_is_terminator = True
+                else:
+                    prev_is_terminator = False
+
+                if ch.isascii() and ch.isalpha():
+                    index = ord(ch.lower()) - ord("a")
+                    letter_frequency[index] += 1
+                    total_letters += 1
+
+    if char_count > 0 and (line_count == 0 or last_char != "\n"):
+        line_count += 1
+
+    return char_count, line_count, sentence_count, letter_frequency, total_letters
+
+
+def scan_word_level(filepath: str):
+    """单词层扫描：词数、平均词长、词频、最长词、超长截断计数。"""
+
+    warning_stats = {"truncated": 0}
+    word_count = 0
+    total_word_len = 0
+    word_frequency: dict[str, int] = {}
+    longest_word = ""
+    longest_word_len = 0
+
+    with open(filepath, "r", encoding="utf-8") as fp:
+        for word in iter_words(fp, warning_stats=warning_stats):
+            word_count += 1
+            word_len = len(word)
+            total_word_len += word_len
+            word_frequency[word] = word_frequency.get(word, 0) + 1
+
+            if word_len > longest_word_len:
+                longest_word_len = word_len
+                longest_word = word
+
+    avg_word_length = (total_word_len / word_count) if word_count > 0 else 0.0
+    truncated_word_count = warning_stats["truncated"]
+
+    return (
+        word_count,
+        avg_word_length,
+        truncated_word_count,
+        word_frequency,
+        longest_word,
+        longest_word_len,
+    )
+
+
+def is_empty_file(filepath: str) -> bool:
+    """前置判断文件是否为空。"""
+
+    with open(filepath, "rb") as fp:
+        fp.seek(0, 2)
+        return fp.tell() == 0
+
+
+def analyze_file(filepath: str) -> AnalysisResult:
+    """执行单文件分析。"""
+
+    if is_empty_file(filepath):
+        return AnalysisResult(
+            stats=TextStats(),
+            word_frequency={},
+            letter_frequency=[0] * 26,
+            total_letters=0,
+            longest_word="",
+            longest_word_len=0,
+        )
+
+    (
+        char_count,
+        line_count,
+        sentence_count,
+        letter_frequency,
+        total_letters,
+    ) = scan_character_level(filepath)
+
+    (
+        word_count,
+        avg_word_length,
+        truncated_word_count,
+        word_frequency,
+        longest_word,
+        longest_word_len,
+    ) = scan_word_level(filepath)
+
+    stats = TextStats(
+        char_count=char_count,
+        word_count=word_count,
+        line_count=line_count,
+        sentence_count=sentence_count,
+        avg_word_length=avg_word_length,
+        truncated_word_count=truncated_word_count,
+    )
+
+    return AnalysisResult(
+        stats=stats,
+        word_frequency=word_frequency,
+        letter_frequency=letter_frequency,
+        total_letters=total_letters,
+        longest_word=longest_word,
+        longest_word_len=longest_word_len,
+    )
+
+
+def extract_terms(filepath: str) -> Document:
+    """提取文档词项并计算 TF。"""
+
+    terms: dict[str, Term] = {}
+    total_words = 0
+
+    with open(filepath, "r", encoding="utf-8") as fp:
+        for word in iter_words(fp):
+            total_words += 1
+            term = terms.get(word)
+            if term is None:
+                terms[word] = Term(word=word, count=1)
+            else:
+                term.count += 1
+
+    if total_words > 0:
+        for term in terms.values():
+            term.tf = term.count / total_words
+
+    return Document(filename=filepath, terms=terms, total_words=total_words)
+
+
+def build_document_from_word_frequency(filename: str, word_frequency: dict[str, int]) -> Document:
+    """由已统计词频构建 Document，避免重复扫描同一文本。"""
+
+    total_words = sum(word_frequency.values())
+    terms: dict[str, Term] = {}
+
+    if total_words > 0:
+        for word, count in word_frequency.items():
+            terms[word] = Term(word=word, count=count, tf=(count / total_words))
+
+    return Document(filename=filename, terms=terms, total_words=total_words)
+
+
+def compute_idf(documents: list[Document]) -> None:
+    """按作业公式 IDF=log(N/(df+1)) 计算 IDF 与 TF-IDF。"""
+
+    doc_count = len(documents)
+    if doc_count == 0:
+        return
+
+    doc_freq: dict[str, int] = {}
+    for doc in documents:
+        for word in doc.terms:
+            doc_freq[word] = doc_freq.get(word, 0) + 1
+
+    for doc in documents:
+        for term in doc.terms.values():
+            term.idf = math.log(doc_count / (doc_freq[term.word] + 1))
+            term.tfidf = term.tf * term.idf
+
+
+def compute_cosine_similarity(doc_a: Document, doc_b: Document) -> float:
+    """计算两个文档 TF-IDF 向量的余弦相似度。"""
+
+    if not doc_a.terms or not doc_b.terms:
+        return 0.0
+
+    all_words = set(doc_a.terms.keys()) | set(doc_b.terms.keys())
+    dot_product = 0.0
+    norm_a = 0.0
+    norm_b = 0.0
+
+    for word in all_words:
+        value_a = doc_a.terms[word].tfidf if word in doc_a.terms else 0.0
+        value_b = doc_b.terms[word].tfidf if word in doc_b.terms else 0.0
+
+        dot_product += value_a * value_b
+        norm_a += value_a * value_a
+        norm_b += value_b * value_b
+
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+
+    return dot_product / math.sqrt(norm_a * norm_b)
+
+
+def extract_top_keywords(document: Document, top_k: int = 5) -> list[Term]:
+    """按 TF-IDF 值提取 TopK 关键词（并列按词典序）。"""
+
+    ranked_terms = sorted(document.terms.values(), key=lambda term: (-term.tfidf, term.word))
+    return ranked_terms[:top_k]
+
+
+def _build_keyword_block(title: str, keywords: list[Term]) -> list[str]:
+    """构建关键词列表块。"""
+
+    lines = [title]
+    if not keywords:
+        lines.append("无有效关键词。")
+        return lines
+
+    lines.append(
+        _pad_display("排名", 6)
+        + _pad_display("关键词", 24)
+        + _pad_display("TF-IDF", 14)
+        + "词频"
+    )
+    for index, term in enumerate(keywords, start=1):
+        lines.append(
+            _pad_display(index, 6)
+            + _pad_display(term.word, 24)
+            + _pad_display(f"{term.tfidf:.6f}", 14)
+            + str(term.count)
+        )
+
+    return lines
+
+
+def build_tfidf_section(doc_a: Document, doc_b: Document, similarity: float, top_k: int = 5) -> str:
+    """构建 TF-IDF 相似度与关键词提取段落。"""
+
+    top_keywords_a = extract_top_keywords(doc_a, top_k=top_k)
+    top_keywords_b = extract_top_keywords(doc_b, top_k=top_k)
+
+    lines = [
+        "TF-IDF 文本相似度分析",
+        "-" * REPORT_LINE_WIDTH,
+        f"{_pad_display('比较文档A：')}{doc_a.filename}",
+        f"{_pad_display('比较文档B：')}{doc_b.filename}",
+        f"{_pad_display('余弦相似度：')}{similarity:.6f}",
+        f"{_pad_display('IDF公式：')}log(N/(df+1))",
+        "说明：文档数量较少时，TF-IDF 可能出现 0 或负值。",
+        "-" * REPORT_LINE_WIDTH,
+        "",
+    ]
+
+    if not any(abs(term.tfidf) > 1e-12 for doc in (doc_a, doc_b) for term in doc.terms.values()):
+        lines.append("提示：当前样本中 TF-IDF 接近全 0，关键词区分度有限。")
+        lines.append("")
+
+    lines.extend(_build_keyword_block(f"文档A Top{top_k} 关键词：", top_keywords_a))
+    lines.append("")
+    lines.extend(_build_keyword_block(f"文档B Top{top_k} 关键词：", top_keywords_b))
+    lines.append("-" * REPORT_LINE_WIDTH)
+
+    return "\n".join(lines)
+
+
+def analyze_tfidf(
+    doc_a_path: str,
+    doc_b_path: str,
+    top_k: int = 5,
+    doc_a_word_frequency: dict[str, int] | None = None,
+) -> str:
+    """执行两文档 TF-IDF 分析并返回报告段落文本。"""
+
+    if top_k <= 0:
+        raise ValueError("top_k 必须为正整数")
+
+    if doc_a_word_frequency is None:
+        doc_a = extract_terms(doc_a_path)
+    else:
+        doc_a = build_document_from_word_frequency(doc_a_path, doc_a_word_frequency)
+
+    doc_b = extract_terms(doc_b_path)
+    compute_idf([doc_a, doc_b])
+    similarity = compute_cosine_similarity(doc_a, doc_b)
+    return build_tfidf_section(doc_a, doc_b, similarity, top_k=top_k)
+
+
+def _build_section(title: str, body_lines: list[str]) -> str:
+    """统一构建“标题-分隔线-内容-分隔线”格式段落。"""
+
+    lines = [title, "-" * REPORT_LINE_WIDTH]
+    lines.extend(body_lines)
+    lines.append("-" * REPORT_LINE_WIDTH)
+    return "\n".join(lines)
+
+
+def build_word_frequency_section(word_frequency: dict[str, int]) -> str:
+    """构建单词频率段落。"""
+
+    title = "单词频率统计（不区分大小写）"
+    body_lines: list[str] = []
+
+    if not word_frequency:
+        body_lines.append("无有效单词。")
+        return _build_section(title, body_lines)
+
+    ranked = sorted(word_frequency.items(), key=lambda item: (-item[1], item[0]))
+    body_lines.append(_pad_display("单词", 24) + "出现次数")
+    for word, count in ranked:
+        body_lines.append(_pad_display(word, 24) + str(count))
+
+    return _build_section(title, body_lines)
+
+
+def build_letter_frequency_section(letter_frequency: list[int], total_letters: int) -> str:
+    """构建字母频率段落。"""
+
+    title = "字母频率统计（a-z，不区分大小写）"
+    body_lines: list[str] = []
+
+    if total_letters == 0:
+        body_lines.append("无有效英文字母。")
+        return _build_section(title, body_lines)
+
+    body_lines.append(_pad_display("字母", 8) + _pad_display("出现次数", 10) + "频率")
+    for index, count in enumerate(letter_frequency):
+        letter = chr(ord("a") + index)
+        frequency = count / total_letters
+        body_lines.append(_pad_display(letter, 8) + _pad_display(count, 10) + f"{frequency:.2f}")
+
+    body_lines.append(f"{_pad_display('总字母数：')}{total_letters}")
+    return _build_section(title, body_lines)
+
+
+def build_longest_word_section(longest_word: str, longest_word_len: int) -> str:
+    """构建最长单词段落。"""
+
+    title = "最长单词统计"
+    body_lines: list[str] = []
+
+    if longest_word_len == 0:
+        body_lines.append("无有效单词。")
+        return _build_section(title, body_lines)
+
+    body_lines.append(f"{_pad_display('最长单词：')}{longest_word}")
+    body_lines.append(f"{_pad_display('长度：')}{longest_word_len}")
+    return _build_section(title, body_lines)
+
+
+def build_notice_section(title: str, message: str) -> str:
+    """构建提示信息段落。"""
+
+    return _build_section(title, [message])
+
+
+def build_report_text(filename: str, analysis: AnalysisResult, extra_sections: list[str] | None = None) -> str:
+    """构建完整格式化报告文本。"""
+
+    stats = analysis.stats
+    summary_items = [
+        ("文件名：", filename),
+        ("总字符数(含空格标点)：", str(stats.char_count)),
+        ("总单词数：", str(stats.word_count)),
+        ("总行数：", str(stats.line_count)),
+        ("总句子数：", str(stats.sentence_count)),
+        ("平均单词长度：", f"{stats.avg_word_length:.2f}"),
+    ]
+    summary_label_width = max(
+        REPORT_LABEL_WIDTH,
+        max(_display_width(label) for label, _ in summary_items),
+    ) + 1
+
+    lines = [
+        "文本分析报告",
+        "-" * REPORT_LINE_WIDTH,
+    ]
+
+    for label, value in summary_items:
+        lines.append(_pad_display(label, summary_label_width) + value)
+
+    lines.append("-" * REPORT_LINE_WIDTH)
+
+    if stats.char_count == 0:
+        lines.append("提示：检测到空文件，统计结果均为 0。")
+
+    if stats.truncated_word_count > 0:
+        lines.append(
+            f"警告：检测到 {stats.truncated_word_count} 个超过 {MAX_WORD_LEN} 字符的单词，已截断后统计。"
+        )
+
+    core_sections = [
+        build_word_frequency_section(analysis.word_frequency),
+        build_letter_frequency_section(analysis.letter_frequency, analysis.total_letters),
+        build_longest_word_section(analysis.longest_word, analysis.longest_word_len),
+    ]
+
+    for section in core_sections:
+        lines.append("")
+        lines.extend(section.splitlines())
+
+    if extra_sections:
+        for section in extra_sections:
+            normalized = section.strip("\n")
+            if not normalized:
+                continue
+            lines.append("")
+            lines.extend(normalized.splitlines())
+
+    return "\n".join(lines) + "\n"
+
+
+def save_report(report_filename: str, report_text: str) -> None:
+    """写入报告文件。"""
+
+    with open(report_filename, "w", encoding="utf-8") as out_fp:
+        out_fp.write(report_text)
+
+    print(f"报告已保存：{report_filename}")
+
+
+def main() -> None:
+    """程序入口：保留作业核心功能，去除过度扩展逻辑。"""
+
+    filename = INPUT_FILENAME
+    compare_filename = TFIDF_COMPARE_FILENAME
 
     try:
-        with open(filename, 'r', encoding='utf-8') as fp:
-            warning_stats = compute_word_freq(
-                fp,
-                freq,
-                total_words,
-                letter_freq=letter_freq,
-                total_letters=total_letters,
-                longest_word=longest_word,
-                max_len=max_len,
-                chars_out=chars_out,
-                lines_out=lines_out,
-            )
-    # 统计读取异常处理
+        analysis = analyze_file(filename)
     except FileNotFoundError:
-        print(f"错误：无法打开文件 {filename}")
+        print(_format_io_error("读取", filename))
         return
     except (PermissionError, UnicodeDecodeError, OSError) as exc:
-        print(f"错误：读取文件 {filename} 失败：{exc}")
+        print(_format_io_error("读取", filename, exc))
         return
 
-    chars = chars_out[0]
-    words = total_words[0]
-    lines = lines_out[0]
-
-    # 输出前排序：频次降序；同频按字母序
-    sorted_freq = sorted(freq, key=lambda item: (-item.count, item.word))
-
-    # 输出基础统计结果
-    print(f"文件 {filename} 统计结果：")
-    print(f"字符数：{chars}")
-    print(f"单词数：{words}")
-    print(f"行数：{lines}")
-
-    # 输出词频表（不区分大小写）
-    print("\n词频统计（不区分大小写）：")
-    if sorted_freq:
-        print(f"{'单词':<20}频次")
-        for item in sorted_freq:
-            print(f"{item.word:<20}{item.count}")
-    else:
-        print("无英文单词可统计。")
-
-    # 输出字母频率表（a-z，不区分大小写）
-    print("\n字母频率统计（a-z，不区分大小写）：")
-    print(f"{'字母':<6}{'次数':<8}频率(次数/总字母数)")
-    for i in range(26):
-        letter = chr(ord('a') + i)
-        count = letter_freq[i]
-        ratio = (count / total_letters[0]) if total_letters[0] > 0 else 0.0
-        print(f"{letter:<6}{count:<8}{ratio:.2f}")
-
-    # 输出最长单词统计（并列最长时取第一个）
-    print("\n最长单词统计：")
-    print(f"最长单词：{longest_word[0] if max_len[0] > 0 else '无'}")
-    print(f"长度：{max_len[0]}")
-
-    # 输出告警信息（若有）
-    if warning_stats['truncated'] > 0:
-        print(
-            f"警告：检测到 {warning_stats['truncated']} 个超过 {MAX_WORD_LEN} 字符的单词，"
-            "已截断后统计。"
+    extra_sections = []
+    try:
+        tfidf_section = analyze_tfidf(
+            filename,
+            compare_filename,
+            top_k=KEYWORD_TOP_K,
+            doc_a_word_frequency=analysis.word_frequency,
         )
-    if warning_stats['ignored_new'] > 0:
-        print(
-            f"警告：不同单词超过 {MAX_WORDS} 个，"
-            f"已忽略 {warning_stats['ignored_new']} 个后续新单词记录，程序已继续执行。"
+        extra_sections.append(tfidf_section)
+    except FileNotFoundError as exc:
+        extra_sections.append(
+            build_notice_section(
+                "TF-IDF 模块提示",
+                f"比较文档不存在：{exc.filename}，已跳过该模块。",
+            )
         )
+    except (PermissionError, UnicodeDecodeError, OSError, ValueError) as exc:
+        extra_sections.append(
+            build_notice_section("TF-IDF 模块提示", f"TF-IDF 分析失败：{exc}，已跳过该模块。")
+        )
+
+    report_text = build_report_text(filename, analysis, extra_sections=extra_sections)
+    print(report_text, end="")
+
+    try:
+        save_report(REPORT_FILENAME, report_text)
+    except (PermissionError, OSError) as exc:
+        print(_format_io_error("保存", REPORT_FILENAME, exc))
 
 
 if __name__ == "__main__":
