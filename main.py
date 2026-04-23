@@ -5,63 +5,63 @@ import unicodedata
 
 
 # 读取与统计配置
-CHUNK_SIZE = 8192
-MAX_WORD_LEN = 50
-SENTENCE_TERMINATORS = ".!?"
+CHUNK_SIZE = 8192  # 每次读取的文件块大小，默认 8KB
+MAX_WORD_LEN = 50  # 单词最大长度，超过将被截断
+SENTENCE_TERMINATORS = ".!?"  # 句子终止符，用于统计句子数量
 
 # 报告格式配置
-REPORT_LABEL_WIDTH = 20
-REPORT_LINE_WIDTH = 52
+REPORT_LABEL_WIDTH = 20  # 报告左侧标签的默认对齐宽度
+REPORT_LINE_WIDTH = 52  # 报告分隔线的默认长度
 
 # 默认输入输出配置
-INPUT_FILENAME = "text_test.txt"
-REPORT_FILENAME = "text_report.txt"
-TFIDF_COMPARE_FILENAME = "test_cases/test_alnum_words.txt"
-KEYWORD_TOP_K = 5
+INPUT_FILENAME = "text_test.txt"  # 默认读取的待分析文件名
+REPORT_FILENAME = "text_report.txt"  # 默认输出的报告文件名
+TFIDF_COMPARE_FILENAME = "test_cases/test_alnum_words.txt"  # TF-IDF 比较的目标文件名
+KEYWORD_TOP_K = 5  # 默认提取的 Top K 关键词数量
 
 
 @dataclass
 class TextStats:
     """统一管理基础统计结果。"""
 
-    char_count: int = 0
-    word_count: int = 0
-    line_count: int = 0
-    sentence_count: int = 0
-    avg_word_length: float = 0.0
-    truncated_word_count: int = 0
+    char_count: int = 0  # 字符总数（包含空白和标点）
+    word_count: int = 0  # 单词总数
+    line_count: int = 0  # 总行数
+    sentence_count: int = 0  # 句子总数
+    avg_word_length: float = 0.0  # 平均单词长度
+    truncated_word_count: int = 0  # 被截断的超长单词数
 
 
 @dataclass
 class Term:
     """词项：词频、TF、IDF、TF-IDF。"""
 
-    word: str
-    count: int = 0
-    tf: float = 0.0
-    idf: float = 0.0
-    tfidf: float = 0.0
+    word: str  # 词项本身
+    count: int = 0  # 在当前文档中出现的次数
+    tf: float = 0.0  # 词频 (Term Frequency)
+    idf: float = 0.0  # 逆文档频率 (Inverse Document Frequency)
+    tfidf: float = 0.0  # TF-IDF 值
 
 
 @dataclass
 class Document:
     """文档：文件名、词项集合、总词数。"""
 
-    filename: str
-    terms: dict[str, Term] = field(default_factory=dict)
-    total_words: int = 0
+    filename: str  # 文档来源的文件名或路径
+    terms: dict[str, Term] = field(default_factory=dict)  # 文档包含的词项字典
+    total_words: int = 0  # 文档的总词数
 
 
 @dataclass
 class AnalysisResult:
     """单文件分析结果。"""
 
-    stats: TextStats
-    word_frequency: dict[str, int]
-    letter_frequency: list[int]
-    total_letters: int
-    longest_word: str
-    longest_word_len: int
+    stats: TextStats  # 基础统计数据（字数、词数等）
+    word_frequency: dict[str, int]  # 各单词出现的频率映射
+    letter_frequency: list[int]  # 各字母频率统计列表（固定长度26）
+    total_letters: int  # 字母总数
+    longest_word: str  # 出现的最长单词
+    longest_word_len: int  # 最长单词的字符长度
 
 
 def is_word_char(ch: str) -> bool:
@@ -100,9 +100,9 @@ def _format_io_error(action: str, filename: str, exc: Exception | None = None) -
 def iter_words(fp, warning_stats: dict[str, int] | None = None) -> Generator[str, None, None]:
     """状态机分词：连续分隔符不会重复计数。"""
 
-    in_word = False
-    current_word_chars: list[str] = []
-    current_word_truncated = False
+    in_word = False  # 标记当前是否正在解析一个单词中
+    current_word_chars: list[str] = []  # 收集当前单词的各个字符
+    current_word_truncated = False  # 标记当前单词是否因过长被截断
 
     def commit_word():
         nonlocal current_word_chars, current_word_truncated
@@ -149,14 +149,14 @@ def iter_words(fp, warning_stats: dict[str, int] | None = None) -> Generator[str
 def scan_character_level(filepath: str):
     """字符层扫描：字符数、行数、句子数、字母频率。"""
 
-    char_count = 0
-    line_count = 0
-    sentence_count = 0
-    last_char = ""
-    prev_is_terminator = False
+    char_count = 0  # 累计字符数
+    line_count = 0  # 累计行数
+    sentence_count = 0  # 累计句子数
+    last_char = ""  # 记录最后一个字符，用于判断末尾行
+    prev_is_terminator = False  # 标记前一个字符是否为句子终止符，避免连续标点重复计数
 
-    letter_frequency = [0] * 26
-    total_letters = 0
+    letter_frequency = [0] * 26  # 记录 a-z 各字母出现次数
+    total_letters = 0  # 累计总英文字母数
 
     with open(filepath, "r", encoding="utf-8") as fp:
         while True:
@@ -190,12 +190,12 @@ def scan_character_level(filepath: str):
 def scan_word_level(filepath: str):
     """单词层扫描：词数、平均词长、词频、最长词、超长截断计数。"""
 
-    warning_stats = {"truncated": 0}
-    word_count = 0
-    total_word_len = 0
-    word_frequency: dict[str, int] = {}
-    longest_word = ""
-    longest_word_len = 0
+    warning_stats = {"truncated": 0}  # 使用字典按引用传递，方便 iter_words 更新截断数
+    word_count = 0  # 累计单词数
+    total_word_len = 0  # 累计所有单词的总长度，用于计算平均长度
+    word_frequency: dict[str, int] = {}  # 记录每个单词的出现次数
+    longest_word = ""  # 记录当前遇到的最长单词
+    longest_word_len = 0  # 记录最长单词的长度
 
     with open(filepath, "r", encoding="utf-8") as fp:
         for word in iter_words(fp, warning_stats=warning_stats):
@@ -338,9 +338,9 @@ def compute_cosine_similarity(doc_a: Document, doc_b: Document) -> float:
         return 0.0
 
     all_words = set(doc_a.terms.keys()) | set(doc_b.terms.keys())
-    dot_product = 0.0
-    norm_a = 0.0
-    norm_b = 0.0
+    dot_product = 0.0  # 向量内积
+    norm_a = 0.0  # 向量 A 的模长平方
+    norm_b = 0.0  # 向量 B 的模长平方
 
     for word in all_words:
         value_a = doc_a.terms[word].tfidf if word in doc_a.terms else 0.0
@@ -576,8 +576,8 @@ def save_report(report_filename: str, report_text: str) -> None:
 def main() -> None:
     """程序入口：保留作业核心功能，去除过度扩展逻辑。"""
 
-    filename = INPUT_FILENAME
-    compare_filename = TFIDF_COMPARE_FILENAME
+    filename = INPUT_FILENAME  # 主分析文件
+    compare_filename = TFIDF_COMPARE_FILENAME  # 用于 TF-IDF 对比的文件
 
     try:
         analysis = analyze_file(filename)
