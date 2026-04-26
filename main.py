@@ -1,7 +1,9 @@
-from collections.abc import Generator
-from dataclasses import dataclass, field
-import math
-import unicodedata
+from collections.abc import Generator  # 用于给 iter_words 生成器函数标注返回类型
+from dataclasses import dataclass, field  # dataclass 自动生成数据类样板代码；field 用于设置默认可变值（如空字典）
+import math  # 提供 math.log（计算 IDF）和 math.sqrt（计算余弦相似度的模长）
+import os  # 文件路径拼接、目录扫描、文件大小查询等所有与操作系统交互的文件系统操作
+import sys  # 检测 sys.frozen（判断是否为 PyInstaller 打包的可执行文件）和 sys.executable（获取 exe 路径）
+import unicodedata  # 判断字符的东亚显示宽度（east_asian_width），用于中文报告标签对齐
 
 
 # 读取与统计配置
@@ -13,10 +15,7 @@ SENTENCE_TERMINATORS = ".!?"  # 句子终止符，用于统计句子数量
 REPORT_LABEL_WIDTH = 20  # 报告左侧标签的默认对齐宽度
 REPORT_LINE_WIDTH = 52  # 报告分隔线的默认长度
 
-# 默认输入输出配置
-INPUT_FILENAME = "text_test.txt"  # 默认读取的待分析文件名
-REPORT_FILENAME = "text_report.txt"  # 默认输出的报告文件名
-TFIDF_COMPARE_FILENAME = "test_cases/test_alnum_words.txt"  # TF-IDF 比较的目标文件名
+# 默认分析配置
 KEYWORD_TOP_K = 5  # 默认提取的 Top K 关键词数量
 
 
@@ -228,9 +227,7 @@ def scan_word_level(filepath: str):
 
 def is_empty_file(filepath: str) -> bool:
     """前置判断文件是否为空。"""
-    with open(filepath, "rb") as fp:  # 以二进制只读 ("rb") 模式打开文件
-        fp.seek(0, 2)  # 把文件读取指针直接移动到文件的末尾 (0表示偏移量，2表示从末尾开始算)
-        return fp.tell() == 0  # fp.tell() 返回当前指针的位置，如果是0，说明文件从头到尾什么都没有，是空文件
+    return os.path.getsize(filepath) == 0  # 直接向操作系统查询文件大小元数据，为0即空文件，无需打开文件
 
 
 def analyze_file(filepath: str) -> AnalysisResult:
@@ -408,8 +405,8 @@ def build_tfidf_section(doc_a: Document, doc_b: Document, similarity: float, top
     lines = [  # 构建报告段落头部的基本信息
         "TF-IDF 文本相似度分析",
         "-" * REPORT_LINE_WIDTH,  # 画一条等宽的横向分割线
-        f"{_pad_display('比较文档A：')}{doc_a.filename}",
-        f"{_pad_display('比较文档B：')}{doc_b.filename}",
+        f"{_pad_display('比较文档A：')}{os.path.basename(doc_a.filename)}",  # 只显示文件名部分，避免打印过长的绝对路径
+        f"{_pad_display('比较文档B：')}{os.path.basename(doc_b.filename)}",  # 只显示文件名部分，避免打印过长的绝对路径
         f"{_pad_display('余弦相似度：')}{similarity:.6f}",  # 相似度保留6位小数
         f"{_pad_display('IDF公式：')}log(N/(df+1))",
         "说明：文档数量较少时，TF-IDF 可能出现 0 或负值。",
@@ -582,60 +579,163 @@ def build_report_text(filename: str, analysis: AnalysisResult, extra_sections: l
     return "\n".join(lines) + "\n"  # 最终，把所有收集到的行拼成一个终极字符串，并在末尾留一个空行
 
 
-def save_report(report_filename: str, report_text: str) -> None:
-    """写入报告文件。"""
+def save_report(report_filename: str, report_text: str, display_path: str | None = None) -> None:
+    """写入报告文件。display_path 用于控制台展示，不传则回退到完整路径。"""
     # 用 utf-8 编码、"w"(覆盖写入) 模式打开指定文件。with 会帮我们自动 close 文件。
     with open(report_filename, "w", encoding="utf-8") as out_fp:
         out_fp.write(report_text)  # 把大字符串直接怼进去
 
-    print(f"报告已保存：{report_filename}")  # 在控制台提示一声大功告成
+    # 优先用调用方传入的展示路径（通常是相对路径），让提示信息更简洁；没传则回退到完整绝对路径
+    shown = display_path if display_path is not None else report_filename
+    print(f"报告已保存：{shown}")
+
+
+def get_base_dir() -> str:
+    """获取程序基准目录：打包为可执行文件时取 exe 所在目录，普通脚本运行时取脚本所在目录。"""
+    # sys.frozen 是 PyInstaller 打包后才会存在的特殊属性，用来区分"可执行文件模式"和"普通脚本模式"
+    if getattr(sys, "frozen", False):  # 如果是打包后的可执行文件（比如 .exe 或 macOS app）
+        return os.path.dirname(sys.executable)  # 返回 exe 文件自身所在的目录，而不是用户当前所在的目录
+    return os.path.dirname(os.path.abspath(__file__))  # 普通脚本模式：取 .py 文件所在目录的绝对路径
+
+
+def discover_txt_files(base_dir: str) -> list[str]:
+    """从 base_dir 出发递归收集所有 .txt 文件的绝对路径，按路径字母顺序排序后返回。"""
+    result: list[str] = []  # 用来存收集到的文件绝对路径，最终会按字母顺序排好
+    for dirpath, dirs, filenames in os.walk(base_dir):  # os.walk 会递归遍历 base_dir 及其全部子目录
+        dirs.sort()  # 原地排序子目录名，保证不同次运行时的遍历顺序完全一致（os.walk 默认顺序不稳定）
+        for filename in sorted(filenames):  # 同一目录里的文件也按文件名字母顺序处理
+            # 只收集 .txt 文件，并跳过程序自动生成的 _report.txt 报告文件，防止报告出现在候选列表里造成循环分析
+            if filename.lower().endswith(".txt") and not filename.lower().endswith("_report.txt"):  # 大小写均可（如 .TXT 也算）
+                result.append(os.path.join(dirpath, filename))  # 把"目录路径 + 文件名"拼成完整绝对路径加入列表
+    return result  # 返回排好序的全部候选文件路径列表
+
+
+def display_file_menu(candidates: list[str], base_dir: str, title: str = "请选择文件") -> None:
+    """把候选文件列表以编号形式打印出来，显示相对路径方便区分同名文件。"""
+    print(f"\n{title}")  # 先打印菜单标题，前面空一行让版面清爽一些
+    print("-" * REPORT_LINE_WIDTH)  # 打印分隔线，宽度和报告正文保持一致
+    for index, filepath in enumerate(candidates, start=1):  # 从编号 1 开始逐一列出候选文件
+        rel_path = os.path.relpath(filepath, base_dir)  # 计算相对于程序目录的路径，避免打印出一大串绝对路径
+        file_size = os.path.getsize(filepath)  # 获取文件大小（单位：字节）
+        size_str = f"{file_size / 1024:.1f} KB" if file_size >= 1024 else f"{file_size} B"  # 超过 1 KB 才换算，否则直接显示字节数
+        print(f"  [{index}] {rel_path}  ({size_str})")  # 打印"编号 + 路径 + 文件大小"一行候选项
+    print("-" * REPORT_LINE_WIDTH)  # 菜单底部再打印一条分隔线
+
+
+def prompt_user_choice(
+    candidates: list[str],
+    base_dir: str,
+    title: str = "请选择文件",
+    exclude_path: str | None = None,
+) -> str | None:
+    """展示候选文件菜单，循环读取用户输入直到拿到有效选择或用户主动退出。
+    exclude_path：需排除的文件路径（用于 TF-IDF 选对比文件时禁止选主文件）。
+    返回选中的文件绝对路径；用户输入 q 则返回 None 表示跳过。"""
+    if exclude_path is not None:  # 如果传入了需要排除的路径（比如已选的主文件）
+        # 用 os.path.abspath 统一转成绝对路径再比较，防止"./a.txt"和"a.txt"被误判为不同文件
+        filtered = [p for p in candidates if os.path.abspath(p) != os.path.abspath(exclude_path)]
+        if not filtered:  # 排除后列表变空了，说明没有其他文件可选
+            print("提示：没有其他可用的 .txt 文件可供对比。")
+            return None
+    else:
+        filtered = candidates  # 没有排除需求，直接用完整候选列表
+
+    display_file_menu(filtered, base_dir, title)  # 把过滤后的候选列表打印成带编号的菜单
+
+    while True:  # 持续循环，直到收到合法输入或用户主动退出
+        try:
+            raw = input("请输入序号（输入 q 跳过/退出）：").strip()  # 读取用户输入，去除首尾多余空格
+        except (EOFError, KeyboardInterrupt):  # 用户按 Ctrl+D（EOF）或 Ctrl+C（中断）时优雅退出
+            print("\n已退出。")
+            return None
+
+        if raw.lower() == "q":  # 用户主动输入 q 表示跳过或退出
+            return None
+
+        if raw.isdigit():  # 只有纯数字才进入编号验证，过滤掉字母、符号等非法输入
+            index = int(raw)
+            if 1 <= index <= len(filtered):  # 编号必须在 1 到列表长度的有效范围内
+                return filtered[index - 1]  # 列表下标从 0 开始，所以编号要减 1
+
+        print(f"输入无效，请输入 1 到 {len(filtered)} 之间的数字，或输入 q 跳过。")  # 输入不合法，提示后继续循环
 
 
 def main() -> None:
     """程序入口：程序的真正起点，负责调度上面的各种功能模块，组织成一个完整的流水线。"""
-    filename = INPUT_FILENAME  # 获取待分析的主文件名（由顶部的全局变量决定，默认 text_test.txt）
-    compare_filename = TFIDF_COMPARE_FILENAME  # 获取用于 TF-IDF 对比计算的另一篇文章的文件名
+    # 第零步：确定程序基准目录。后续的文件扫描和报告保存都以此为基础，不再依赖外部的"当前工作目录"
+    base_dir = get_base_dir()  # 获取程序自身（.py 脚本或打包后的 exe）所在的目录
+    print(f"扫描目录：{base_dir}")  # 告知用户当前扫描的是哪个目录，方便排查"找不到文件"之类的问题
 
-    try:  # 第一步：尝试执行核心分析。使用 try-except 进行异常捕获，防止程序因为找不到文件直接报错退出
-        analysis = analyze_file(filename)  # 调用单文件分析功能，拿到包含了各种统计数据的结果包
-    except FileNotFoundError:  # 如果找不到指定的文件
-        print(_format_io_error("读取", filename))  # 打印出易读的错误提示
-        return  # 提前结束程序
-    except (PermissionError, UnicodeDecodeError, OSError) as exc:  # 捕获其他比如没权限读取、编码不匹配等系统错误
-        print(_format_io_error("读取", filename, exc))  # 把系统附带的具体错误原因一起打印出来
-        return  # 提前结束程序
+    # 第一步：递归扫描基准目录下所有 .txt 文件，组成候选列表供后续选择
+    candidates = discover_txt_files(base_dir)  # 递归发现所有 .txt 文件，按路径字母顺序排好
+    if not candidates:  # 如果整个目录树里一个 .txt 文件都没有，直接报错退出
+        print("错误：当前目录下未找到任何 .txt 文件，程序退出。")
+        return
 
-    extra_sections = []  # 第二步：准备一个空列表，用来装像 TFIDF 这样附加的、独立的扩展报告段落
-    try:  # 尝试执行进阶的 TF-IDF 比对模块
-        tfidf_section = analyze_tfidf(
-            filename,
-            compare_filename,
-            top_k=KEYWORD_TOP_K,
-            doc_a_word_frequency=analysis.word_frequency,  # 关键：把主文件刚刚算好的词频传进去，防止让电脑再把主文件读一遍
-        )
-        extra_sections.append(tfidf_section)  # 如果执行成功了，就把生成的这块报告文字塞进附加列表里
-    except FileNotFoundError as exc:  # 如果找不到那个“对比文件”
-        # 这里跟主文件不一样，对比文件找不到不需要退出程序，只需要在报告里加一条提示说“我跳过这个步骤了”
-        extra_sections.append(
-            build_notice_section(
-                "TF-IDF 模块提示",
-                f"比较文档不存在：{exc.filename}，已跳过该模块。",
+    # 第二步：让用户从候选列表中选择要分析的主文件
+    if len(candidates) == 1:  # 只有一个候选文件时，不用弹菜单，直接自动选中
+        filename = candidates[0]
+        print(f"\n检测到唯一 .txt 文件，已自动选中：{os.path.relpath(filename, base_dir)}")
+    else:  # 有多个候选文件，显示带编号的菜单让用户手动选择
+        filename = prompt_user_choice(candidates, base_dir, title="选择要分析的主文件")
+        if filename is None:  # 用户输入了 q 表示不想继续，退出程序
+            print("已退出程序。")
+            return
+
+    # 第三步：对选中的主文件执行核心文本分析，得到各项统计数据
+    try:
+        analysis = analyze_file(filename)  # 调用单文件分析功能，拿到包含各种统计数据的结果包
+    except FileNotFoundError:  # 文件不存在（理论上不会发生，因为是从真实扫描结果里选的）
+        print(_format_io_error("读取", filename))
+        return
+    except (PermissionError, UnicodeDecodeError, OSError) as exc:  # 没有读取权限、编码不对或其他系统级错误
+        print(_format_io_error("读取", filename, exc))
+        return
+
+    # 第四步：询问用户是否需要进行 TF-IDF 文本相似度对比（可选的增强分析模块）
+    extra_sections = []  # 准备一个空列表，用来装 TF-IDF 这类附加的报告段落
+    try:
+        tfidf_choice = input("\n是否需要进行 TF-IDF 文本相似度对比分析？(y/n)：").strip().lower()
+    except (EOFError, KeyboardInterrupt):  # 非交互环境（管道输入）或用户中断时，默认跳过 TF-IDF 模块
+        tfidf_choice = "n"
+
+    if tfidf_choice == "y":  # 用户选择进行对比分析
+        if len(candidates) < 2:  # 整个目录树里只有 1 个 .txt 文件，根本没有第二个文件可以用来对比
+            print("提示：当前目录下只有一个 .txt 文件，无法进行对比，已跳过 TF-IDF 模块。")
+        else:
+            compare_filename = prompt_user_choice(  # 再弹一次菜单，让用户选择对比文件
+                candidates,
+                base_dir,
+                title="选择用于 TF-IDF 对比的文件（不能与主文件相同）",
+                exclude_path=filename,  # 把已选的主文件排除出候选，避免"自己和自己对比"
             )
-        )
-    except (PermissionError, UnicodeDecodeError, OSError, ValueError) as exc:  # 捕获对比模块的其他错误
-        extra_sections.append(
-            build_notice_section("TF-IDF 模块提示", f"TF-IDF 分析失败：{exc}，已跳过该模块。")
-        )
+            if compare_filename is not None:  # 用户选了对比文件（没有输入 q 跳过）
+                try:
+                    tfidf_section = analyze_tfidf(
+                        filename,
+                        compare_filename,
+                        top_k=KEYWORD_TOP_K,
+                        doc_a_word_frequency=analysis.word_frequency,  # 复用主文件已算好的词频，避免重复扫描文件
+                    )
+                    extra_sections.append(tfidf_section)  # 把生成的 TF-IDF 报告段落塞进附加列表
+                except (PermissionError, UnicodeDecodeError, OSError, ValueError) as exc:  # 对比模块出错，不退出程序，在报告里加一条提示即可
+                    extra_sections.append(
+                        build_notice_section("TF-IDF 模块提示", f"TF-IDF 分析失败：{exc}，已跳过该模块。")
+                    )
 
-    # 第三步：排版生成。将前面的基础分析数据包，以及可能存在的附加段落，统一丢给排版函数，生成最终的长文本报告
-    report_text = build_report_text(filename, analysis, extra_sections=extra_sections)
-    print(report_text, end="")  # 将这份整理好的报告打印在屏幕终端上供你查看 (end="" 是为了防止结尾多出一个空行)
+    # 第五步：排版生成完整报告文本，把统计数据和所有附加段落拼成一份可读性强的长文本
+    display_name = os.path.relpath(filename, base_dir)  # 把绝对路径转成相对路径，让报告里的文件名字段更简洁易读
+    report_text = build_report_text(display_name, analysis, extra_sections=extra_sections)
+    print(report_text, end="")  # 把报告打印到终端供即时查看（end="" 防止末尾多出一个多余的空行）
 
-    try:  # 第四步：尝试保存。尝试把刚刚生成的纯文本报告保存成一个本地 .txt 文件
-        save_report(REPORT_FILENAME, report_text)  # 调用保存功能
-    except (PermissionError, OSError) as exc:  # 如果当前文件夹没有写入权限，或者磁盘满了之类的
-        print(_format_io_error("保存", REPORT_FILENAME, exc))  # 提示用户文件虽然算完了但是没存下来
-
+    # 第六步：把报告保存到与主文件相同的目录下，文件名格式为"原文件名_report.txt"
+    input_stem = os.path.splitext(os.path.basename(filename))[0]  # 取主文件的文件名，去掉 .txt 扩展名部分
+    report_filename = os.path.join(os.path.dirname(filename), f"{input_stem}_report.txt")  # 拼出报告文件的完整保存路径
+    try:
+        # 传入相对路径作为展示名，让终端提示信息与报告头中的文件名风格保持一致
+        save_report(report_filename, report_text, display_path=os.path.relpath(report_filename, base_dir))
+    except (PermissionError, OSError) as exc:  # 如果目录没有写入权限或者磁盘满了之类的情况
+        print(_format_io_error("保存", report_filename, exc))  # 提示用户文件算完了但没能存下来
 
 if __name__ == "__main__":  # 这是 Python 语言经典的约定俗成写法
     # 意思是：只有当你直接运行这个 python 脚本文件时，才会触发里面的 main() 函数。
