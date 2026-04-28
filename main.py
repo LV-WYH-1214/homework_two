@@ -71,7 +71,7 @@ def is_word_char(ch: str) -> bool:
 
 
 def _display_width(text: str) -> int:
-    """计算字符串显示宽度（全角/宽字符计为 2）。"""
+    """计算字符串显示宽度（全角/宽字符计为 2)。"""
     width = 0  # 初始化宽度为0
     for ch in str(text):  # 遍历字符串中的每一个字符
         # unicodedata.east_asian_width 用来判断字符是不是全角字符（比如中文字符在屏幕上占的位置比英文字母宽）

@@ -1,0 +1,3 @@
+The software engineering program is growing fast, and students stay curious.
+In class, they read papers, build tools, and test ideas in real projects.
+In 2025, one team asked: "Can AI assist debugging?" Yes; careful review still matters.
