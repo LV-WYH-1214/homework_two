@@ -305,7 +305,7 @@ def extract_terms(filepath: str) -> Document:
 
 
 def build_document_from_word_frequency(filename: str, word_frequency: dict[str, int]) -> Document:
-    """由已经统计好的词频字典直接构建 Document，避免为了算 TF-IDF 把同一个文件又扫描一遍。"""
+    """由已经统计好的词频字典直接构建 Document,避免为了算 TF-IDF 把同一个文件又扫描一遍。"""
     total_words = sum(word_frequency.values())  # 把字典里所有的词频次数加起来，就是文档总词数
     terms: dict[str, Term] = {}  # 创建空字典存 Term 对象
 
@@ -405,18 +405,18 @@ def build_tfidf_section(doc_a: Document, doc_b: Document, similarity: float, top
     lines = [  # 构建报告段落头部的基本信息
         "TF-IDF 文本相似度分析",
         "-" * REPORT_LINE_WIDTH,  # 画一条等宽的横向分割线
-        f"{_pad_display('比较文档A：')}{os.path.basename(doc_a.filename)}",  # 只显示文件名部分，避免打印过长的绝对路径
-        f"{_pad_display('比较文档B：')}{os.path.basename(doc_b.filename)}",  # 只显示文件名部分，避免打印过长的绝对路径
-        f"{_pad_display('余弦相似度：')}{similarity:.6f}",  # 相似度保留6位小数
-        f"{_pad_display('IDF公式：')}log(N/(df+1))",
-        "说明：文档数量较少时，TF-IDF 可能出现 0 或负值。",
+        f"{_pad_display('比较文档A:')}{os.path.basename(doc_a.filename)}",  # 只显示文件名部分，避免打印过长的绝对路径
+        f"{_pad_display('比较文档B:')}{os.path.basename(doc_b.filename)}",  # 只显示文件名部分，避免打印过长的绝对路径
+        f"{_pad_display('余弦相似度:')}{similarity:.6f}",  # 相似度保留6位小数
+        f"{_pad_display('IDF公式:')}log(N/(df+1))",
+        "说明:文档数量较少时,TF-IDF 可能出现 0 或负值。",
         "-" * REPORT_LINE_WIDTH,  # 画一条等宽的横向分割线
         "",  # 空一行
     ]
 
     # 如果两篇文档所有词的 tfidf 都在非常接近0的区间内（极小值）
     if not any(abs(term.tfidf) > 1e-12 for doc in (doc_a, doc_b) for term in doc.terms.values()):
-        lines.append("提示：当前样本中 TF-IDF 接近全 0，关键词区分度有限。")
+        lines.append("提示：当前样本中 TF-IDF 接近全 0,关键词区分度有限。")
         lines.append("")
 
     lines.extend(_build_keyword_block(f"文档A Top{top_k} 关键词：", top_keywords_a))  # 把A的关键词拼装进列表
@@ -481,7 +481,7 @@ def build_word_frequency_section(word_frequency: dict[str, int]) -> str:
 
 def build_letter_frequency_section(letter_frequency: list[int], total_letters: int) -> str:
     """构建字母频率段落。"""
-    title = "字母频率统计（a-z，不区分大小写）"  # 设定固定标题
+    title = "字母频率统计(a-z,不区分大小写)"  # 设定固定标题
     body_lines: list[str] = []  # 准备列表装内容
 
     if total_letters == 0:  # 如果整篇文章连一个英文字母都没有
@@ -526,7 +526,7 @@ def build_report_text(filename: str, analysis: AnalysisResult, extra_sections: l
     stats = analysis.stats  # 提取基础统计包
     summary_items = [  # 把要展示的基础信息整理成一个个 (标签名, 值) 的元组列表
         ("文件名：", filename),
-        ("总字符数(含空格标点)：", str(stats.char_count)),
+        ("总字符数(含空格标点):", str(stats.char_count)),
         ("总单词数：", str(stats.word_count)),
         ("总行数：", str(stats.line_count)),
         ("总句子数：", str(stats.sentence_count)),
@@ -629,7 +629,7 @@ def prompt_user_choice(
     exclude_path: str | None = None,
 ) -> str | None:
     """展示候选文件菜单，循环读取用户输入直到拿到有效选择或用户主动退出。
-    exclude_path：需排除的文件路径（用于 TF-IDF 选对比文件时禁止选主文件）。
+    exclude_path:需排除的文件路径（用于 TF-IDF 选对比文件时禁止选主文件）。
     返回选中的文件绝对路径；用户输入 q 则返回 None 表示跳过。"""
     if exclude_path is not None:  # 如果传入了需要排除的路径（比如已选的主文件）
         # 用 os.path.abspath 统一转成绝对路径再比较，防止"./a.txt"和"a.txt"被误判为不同文件
@@ -695,7 +695,7 @@ def main() -> None:
     # 第四步：询问用户是否需要进行 TF-IDF 文本相似度对比（可选的增强分析模块）
     extra_sections = []  # 准备一个空列表，用来装 TF-IDF 这类附加的报告段落
     try:
-        tfidf_choice = input("\n是否需要进行 TF-IDF 文本相似度对比分析？(y/n)：").strip().lower()
+        tfidf_choice = input("\n是否需要进行 TF-IDF 文本相似度对比分析？(y/n):").strip().lower()
     except (EOFError, KeyboardInterrupt):  # 非交互环境（管道输入）或用户中断时，默认跳过 TF-IDF 模块
         tfidf_choice = "n"
 
